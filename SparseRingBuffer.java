@@ -2,6 +2,7 @@
 /** The spare ring buffer is available as a standalone Java file at
  * <https://github.com/osteele/SpareRingBuffer.java>.
  */
+
 import java.util.*;
 
 /**
@@ -14,18 +15,26 @@ import java.util.*;
 public class SparseRingBuffer implements Iterable<BufferEntry> {
   private final int bufferLength;
 
-  int values[]; // indexed by sampleTime % bufferSize
-  int nextIndices[]; // indexed by sampleTime % bufferSize
+  int values[]; // indexed by key % bufferSize
+  int nextIndices[]; // indexed by key % bufferSize
   private int bufferStartKey = -1;
   private int firstIndex = -1; // index of first entry, or -1
   private int lastIndex = -1; // index of last entry, or -1
-  private int firstIndexKey = -1; // the sampletime of the first entry
+  private int firstKey = -1; // the key of the first entry
   private int count = 0; // number of entries
 
   public SparseRingBuffer(int size) {
     this.bufferLength = size;
     this.values = new int[size];
     this.nextIndices = new int[size];
+  }
+
+  public void clear() {
+    bufferStartKey = -1;
+    firstIndex = -1;
+    lastIndex = -1;
+    firstKey = -1;
+    count = 0;
   }
 
   public boolean isEmpty() {
@@ -37,7 +46,7 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
   }
 
   public boolean containsKey(int key) {
-    if (bufferStartKey < 0 || key < firstIndexKey || key > firstIndexKey + bufferLength)
+    if (bufferStartKey < 0 || key < firstKey || key > firstKey + bufferLength)
       return false;
     int index = key - bufferStartKey;
     if (bufferLength <= index && index < bufferLength + firstIndex)
@@ -54,32 +63,50 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
   public void put(int key, int value) {
     removeBefore(key - bufferLength + 1);
     int index = key % bufferLength;
-    assert bufferStartKey < 0 || getKeyForIndex(index) == key;
+    // assert bufferStartKey < 0 || getKeyForIndex(index) == key;
     values[index] = value;
     nextIndices[index] = -1;
     if (firstIndex < 0) {
-      // initial value
+      // add initial value to empty buffer
       bufferStartKey = key / bufferLength * bufferLength;
       firstIndex = lastIndex = index;
-      firstIndexKey = key;
+      firstKey = key;
       count++;
-    } else if (getKeyForIndex(lastIndex) == key) {
-      // replace last value
-    } else if (getKeyForIndex(lastIndex) < key) {
-      // append
+      return;
+    }
+    int lastKey = getKeyForIndex(lastIndex);
+    if (key > lastKey) {
+      // append (the common case)
       assert nextIndices[lastIndex] == -1;
-      assert getKeyForIndex(lastIndex) < key;
+      assert lastKey < key;
       assert index != lastIndex;
       nextIndices[lastIndex] = index;
       lastIndex = index;
       count++;
+    } else if (lastKey == key) {
+      // replace last value: nothing else to do
+    } else if (key < firstKey) {
+      // insert at beginning, before previous first element
+      if (key < lastKey - bufferLength) {
+        throw new IndexOutOfBoundsException(key);
+      }
+      nextIndices[index] = firstIndex;
+      firstIndex = index;
+      firstKey = key;
+      count++;
     } else {
-      // insert. This is relatively simply, although inefficiently, implemented
-      // by iterating from the start, with obvious techniques to trade off
-      // against the other cases to make it efficient. However, I don't need it
-      // for my use cases.
-      throw new UnsupportedOperationException(
-          "SparseRingBuffer.put does not support insertion into the middle of the buffer");
+      // lastKey - bufferLength < key < lastKey
+      // insert between elements
+      int prev = -1;
+      int next = firstIndex;
+      while (getKeyForIndex(next) < key) {
+        prev = next;
+        next = nextIndices[next];
+        assert next >= 0;
+      }
+      nextIndices[prev] = index;
+      nextIndices[index] = next;
+      count++;
     }
   }
 
@@ -92,7 +119,17 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
   }
 
   void removeBefore(int key) {
-    while (count > 0 && firstIndexKey < key) {
+    // This is necessary to guard the fast path.
+    if (lastIndex < 0) {
+      return;
+    }
+    // fast path detects when the entire buffer would be cleared. This is
+    // functionally identical to the slow path.
+    if (getKeyForIndex(lastIndex) < key) {
+      clear();
+      return;
+    }
+    while (count > 0 && firstKey < key) {
       removeFirstEntry();
     }
   }
@@ -104,11 +141,11 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
     nextIndices[prevFirstIndex] = -1;
     if (--count == 0) {
       bufferStartKey = -1;
-      firstIndexKey = -1;
+      firstKey = -1;
       lastIndex = -1;
     } else {
-      bufferStartKey = firstIndex / bufferLength * bufferLength;
-      firstIndexKey += (firstIndex - prevFirstIndex + bufferLength) % bufferLength;
+      firstKey += (firstIndex - prevFirstIndex + bufferLength) % bufferLength;
+      bufferStartKey = firstKey / bufferLength * bufferLength;
     }
   }
 
@@ -127,9 +164,10 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
    * values.
    */
   public Iterator<BufferEntry> iterator() {
-    return new SampleBufferIterator(this, firstIndex);
+    return new SparseRingBufferIterator(this, firstIndex);
   }
 
+  /** Returns a string e.g. {10:1,20:2}. This is intended for debugging. */
   public String toString() {
     var str = new StringBuffer("{");
     String prefix = "";
@@ -141,12 +179,12 @@ public class SparseRingBuffer implements Iterable<BufferEntry> {
   }
 }
 
-class SampleBufferIterator implements Iterator<BufferEntry> {
+class SparseRingBufferIterator implements Iterator<BufferEntry> {
   private final SparseRingBuffer buffer;
   private int index;
   private BufferEntry sample; // flyweight
 
-  SampleBufferIterator(SparseRingBuffer buffer, int index) {
+  SparseRingBufferIterator(SparseRingBuffer buffer, int index) {
     this.buffer = buffer;
     this.index = index;
   }
@@ -159,37 +197,14 @@ class SampleBufferIterator implements Iterator<BufferEntry> {
     if (index < 0) {
       throw new NoSuchElementException();
     }
-    int sampleTime = buffer.getKeyForIndex(index);
+    int key = buffer.getKeyForIndex(index);
     int value = buffer.values[index];
     if (sample == null) {
-      sample = new BufferEntry(sampleTime, value);
+      sample = new BufferEntry(key, value);
     } else {
-      sample.update(sampleTime, value);
+      sample.update(key, value);
     }
     index = buffer.nextIndices[index];
     return sample;
-  }
-}
-
-class BufferEntry {
-  int key;
-  int value;
-
-  BufferEntry(int key, int value) {
-    this.key = key;
-    this.value = value;
-  }
-
-  int getKey() {
-    return this.key;
-  }
-
-  int getValue() {
-    return this.value;
-  }
-
-  void update(int sampleTime, int value) {
-    this.key = sampleTime;
-    this.value = value;
   }
 }
