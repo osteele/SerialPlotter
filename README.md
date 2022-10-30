@@ -1,9 +1,11 @@
 # SerialPlotter
 
-A recreation of the Arduino Serial Plotter tool, in Processing.
+A recreation of the Arduino Serial Plotter tool, as a Processing sketch.
 
-The spare ring buffer is available as a standalone Java file at
-<https://github.com/osteele/SpareRingBuffer.java>.
+![Screenshot](docs/screenshot.png)
+
+The sparse ring buffer is available as a standalone Java project at
+<https://github.com/osteele/SparseRingBuffer.java>.
 
 ## License
 
